@@ -47,11 +47,12 @@ func main() {
 
 		topic := c.PostForm("topic")
 		category := c.PostForm("category")
-		videoType := c.PostForm("type")
-		scenesJson := c.PostForm("scenes")
-
+		
+		// 1. FIX: Normalize Input (Remove spaces, lowercase) to fix "Short vs Long" bug
+		videoType := strings.ToLower(strings.TrimSpace(c.PostForm("type")))
 		if videoType == "" { videoType = "short" }
 
+		scenesJson := c.PostForm("scenes")
 		var scenes []SceneData
 		if err := json.Unmarshal([]byte(scenesJson), &scenes); err != nil {
 			fmt.Println("❌ Error: Invalid JSON")
@@ -102,12 +103,12 @@ func main() {
 			c.JSON(500, gin.H{"error": "AI Script failed: " + err.Error()})
 			return
 		}
-		
+
 		// Padding check
 		if len(scriptData.Items) < len(scenes) {
-		    for len(scriptData.Items) < len(scenes) {
-		        scriptData.Items = append(scriptData.Items, "Here is another item.")
-		    }
+			for len(scriptData.Items) < len(scenes) {
+				scriptData.Items = append(scriptData.Items, "Here is another item.")
+			}
 		}
 
 		// --- RENDER ---
@@ -205,7 +206,7 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	return result, nil
 }
 
-// --- 2. RENDER ENGINE (Robust 30FPS + Low Memory) ---
+// --- 2. RENDER ENGINE (FIXED: Force 30FPS + Low Memory) ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
 	if err := downloadGoogleTTS(text, audioPath); err != nil {
@@ -213,7 +214,7 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 	os.Remove(outputPath)
 
-	// Scale + Force 30 FPS + Format
+	// Scale Logic
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
@@ -223,11 +224,13 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	isVideo := ext == ".mp4" || ext == ".mov" || ext == ".avi"
 	var cmd *exec.Cmd
 
+	// 2. FIX: Added "-r 30" to BOTH commands to force 30 FPS.
+	// This prevents the "Exit 183" stitching crash.
 	if isVideo {
 		cmd = exec.Command("ffmpeg", "-stream_loop", "-1", "-i", mediaPath, "-i", audioPath,
 			"-map", "0:v", "-map", "1:a", 
 			"-vf", scale, 
-			"-r", "30",                 // <--- NEW: Force 30 FPS
+			"-r", "30",                 // <--- CRITICAL FIX: Force 30 FPS
 			"-threads", "1", 
 			"-c:v", "libx264", "-preset", "ultrafast", 
 			"-c:a", "aac", "-b:a", "128k", 
@@ -235,7 +238,7 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	} else {
 		cmd = exec.Command("ffmpeg", "-loop", "1", "-i", mediaPath, "-i", audioPath,
 			"-vf", scale, 
-			"-r", "30",                 // <--- NEW: Force 30 FPS
+			"-r", "30",                 // <--- CRITICAL FIX: Force 30 FPS
 			"-threads", "1",
 			"-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", 
 			"-c:a", "aac", "-b:a", "128k", 
@@ -251,18 +254,17 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	return nil
 }
 
-// --- 3. STITCHER (Debug Enabled) ---
+// --- 3. STITCHER (FIXED: Overwrite File) ---
 func stitchVideos(files []string, outputFile string) error {
 	listFile, _ := os.Create("output/list.txt")
 	for _, f := range files { listFile.WriteString(fmt.Sprintf("file '%s'\n", filepath.Base(f))) }
 	listFile.Close()
 
-	os.Remove(outputFile) // Attempt delete
+	os.Remove(outputFile) 
 	
-	// Added "-y" to force overwrite if file is locked/exists
+	// 3. FIX: Added "-y" to force overwrite existing files
 	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile)
 	
-	// Capture output to see WHY it fails (183)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("Stitch Error: %v | Log: %s", err, string(output))
