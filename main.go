@@ -18,6 +18,7 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+// Data Structures
 type SceneData struct {
 	Name    string `json:"name"`
 	Details string `json:"details"`
@@ -40,20 +41,20 @@ func main() {
 	_ = godotenv.Load()
 
 	r := gin.Default()
-	
+
 	// Serve the output folder so the app can play videos
 	r.Static("/videos", "./output")
-	
+
 	// Increase upload limit for video files (100MB)
-	r.MaxMultipartMemory = 100 << 20 
+	r.MaxMultipartMemory = 100 << 20
 
 	r.POST("/generate-multi-scene", func(c *gin.Context) {
 		fmt.Println("\n🔹 STEP 1: Request Received") // DEBUG
 
 		// 2. Parse Form Data
 		topic := c.PostForm("topic")
-		category := c.PostForm("category") 
-		videoType := c.PostForm("type")    
+		category := c.PostForm("category")
+		videoType := c.PostForm("type")
 		scenesJson := c.PostForm("scenes")
 
 		if videoType == "" { videoType = "short" }
@@ -70,20 +71,20 @@ func main() {
 		// --- 3. MEDIA PROCESSING ENGINE ---
 		saveMedia := func(formKey, fallbackName string, tryTMDB bool) string {
 			file, err := c.FormFile(formKey)
-			
+
 			// A. User Uploaded a File
 			if err == nil {
 				ext := filepath.Ext(file.Filename)
-				if ext == "" { ext = ".jpg" } 
+				if ext == "" { ext = ".jpg" }
 				savePath := fmt.Sprintf("output/%s%s", formKey, ext)
 				c.SaveUploadedFile(file, savePath)
 				fmt.Printf("📂 Saved Upload: %s\n", savePath)
 				return savePath
-			} 
+			}
 
 			// B. No Upload -> Use Fallback
 			savePath := fmt.Sprintf("output/%s.jpg", formKey)
-			
+
 			// Try TMDB if it's a scene
 			if tryTMDB && category == "movie" && fallbackName != "" {
 				// fmt.Printf("🔎 TMDB Search: %s\n", fallbackName)
@@ -92,7 +93,7 @@ func main() {
 				}
 				// fmt.Println("⚠️ TMDB Failed, using placeholder.")
 			}
-			
+
 			// Placeholder
 			txt := fallbackName
 			if txt == "" { txt = "Scene" }
@@ -118,8 +119,8 @@ func main() {
 			return
 		}
 
-		// --- 5. RENDER SEGMENTS (Video/Image + Audio) ---
-		fmt.Println("🔹 STEP 3: Rendering Segments (OpenAI TTS + FFmpeg)...") // DEBUG
+		// --- 5. RENDER SEGMENTS (Using Google TTS) ---
+		fmt.Println("🔹 STEP 3: Rendering Segments (Google TTS + FFmpeg)...") // DEBUG
 		var segmentFiles []string
 
 		// Render Intro
@@ -127,7 +128,7 @@ func main() {
 		if err := renderSegment(scriptData.Intro, introPath, introVid, videoType); err == nil {
 			segmentFiles = append(segmentFiles, introVid)
 		} else {
-			fmt.Printf("❌ Error Rendering Intro: %v\n", err) // DEBUG
+			fmt.Printf("❌ Error Rendering Intro: %v\n", err)
 		}
 
 		// Render Scenes
@@ -137,7 +138,7 @@ func main() {
 			if err := renderSegment(itemScript, scenePaths[i], segPath, videoType); err == nil {
 				segmentFiles = append(segmentFiles, segPath)
 			} else {
-				fmt.Printf("❌ Error Rendering Scene %d: %v\n", i, err) // DEBUG
+				fmt.Printf("❌ Error Rendering Scene %d: %v\n", i, err)
 			}
 		}
 
@@ -163,29 +164,28 @@ func main() {
 			scheme = "https"
 		}
 		videoUrl := fmt.Sprintf("%s://%s/videos/final_movie.mp4", scheme, c.Request.Host)
-		
+
 		c.JSON(200, gin.H{"status": "success", "video_url": videoUrl})
 	})
 
 	// Ensure output directory exists
 	if _, err := os.Stat("output"); os.IsNotExist(err) { os.Mkdir("output", 0755) }
-	
+
 	port := os.Getenv("PORT")
 	if port == "" { port = "8080" }
 	fmt.Println("🚀 Server running on port " + port)
 	r.Run(":" + port)
 }
 
-// --- 1. AI BRAIN ---
+// --- 1. AI BRAIN (Uses Groq) ---
 func generateSegmentedScript(topic, category, videoType string, scenes []SceneData) (ScriptResponse, error) {
 	apiKey := os.Getenv("GROQ_API_KEY")
-	if apiKey == "" { return ScriptResponse{}, fmt.Errorf("missing GROQ_API_KEY") } // Check Key
+	if apiKey == "" { return ScriptResponse{}, fmt.Errorf("missing GROQ_API_KEY") }
 
 	config := openai.DefaultConfig(apiKey)
 	config.BaseURL = "https://api.groq.com/openai/v1"
 	client := openai.NewClientWithConfig(config)
 
-	// Context Building
 	itemsContext := ""
 	for i, s := range scenes {
 		name := s.Name
@@ -220,43 +220,25 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	var result ScriptResponse
 	clean := strings.ReplaceAll(resp.Choices[0].Message.Content, "```json", "")
 	clean = strings.ReplaceAll(clean, "```", "")
-	
+
 	if err := json.Unmarshal([]byte(clean), &result); err != nil {
 		return ScriptResponse{}, fmt.Errorf("json parse error: %v", err)
 	}
 	return result, nil
 }
 
-// --- 2. RENDER ENGINE (CLOUD READY) ---
+// --- 2. RENDER ENGINE (Using Free Google TTS) ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
-	// 1. Generate Audio using OpenAI (Works on Linux/Cloud)
-	apiKey := os.Getenv("OPENAI_API_KEY") 
-	if apiKey == "" {
-		return fmt.Errorf("missing OPENAI_API_KEY")
-	}
-
-	config := openai.DefaultConfig(apiKey)
-	client := openai.NewClientWithConfig(config)
-
-	req := openai.CreateSpeechRequest{
-		Model: openai.TTSModel1,
-		Input: text,
-		Voice: openai.VoiceAlloy, 
-	}
-
-	resp, err := client.CreateSpeech(context.Background(), req)
-	if err != nil {
-		return fmt.Errorf("OpenAI TTS failed: %v", err)
-	}
-	defer resp.Close()
-
-	// Save Audio as MP3
+	// 1. Generate Audio using Google TTS (Free)
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
-	outFile, err := os.Create(audioPath)
-	if err != nil { return err }
-	io.Copy(outFile, resp)
-	outFile.Close()
 
+	// Call the Helper
+	err := downloadGoogleTTS(text, audioPath)
+	if err != nil {
+		return fmt.Errorf("Google TTS failed: %v", err)
+	}
+
+	// Clean up old video file if exists
 	os.Remove(outputPath)
 
 	// 2. Set Resolution
@@ -265,17 +247,16 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p" // Long
 	}
 
-	// 3. Check Input Type
+	// 3. Render
 	ext := strings.ToLower(filepath.Ext(mediaPath))
 	isVideo := ext == ".mp4" || ext == ".mov" || ext == ".avi"
-
 	var cmd *exec.Cmd
 
 	if isVideo {
-		// fmt.Println("🎥 Rendering Video:", mediaPath)
+		// Video Logic
 		cmd = exec.Command("ffmpeg",
-			"-stream_loop", "-1", "-i", mediaPath, // Input 0: Video
-			"-i", audioPath,                       // Input 1: Audio
+			"-stream_loop", "-1", "-i", mediaPath, // Video input
+			"-i", audioPath,                       // Audio input
 			"-map", "0:v", "-map", "1:a",
 			"-vf", scale,
 			"-c:v", "libx264", "-preset", "fast",
@@ -284,10 +265,10 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 			outputPath,
 		)
 	} else {
-		// fmt.Println("🖼️ Rendering Image:", mediaPath)
+		// Image Logic
 		cmd = exec.Command("ffmpeg",
-			"-loop", "1", "-i", mediaPath,
-			"-i", audioPath,
+			"-loop", "1", "-i", mediaPath, // Image input
+			"-i", audioPath,               // Audio input
 			"-vf", scale,
 			"-c:v", "libx264", "-tune", "stillimage",
 			"-c:a", "aac", "-b:a", "192k",
@@ -297,13 +278,40 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 
 	output, err := cmd.CombinedOutput()
-	// Clean up audio file
-	os.Remove(audioPath)
+	os.Remove(audioPath) // Cleanup audio
 
 	if err != nil {
 		fmt.Printf("❌ FFmpeg Error: %s\n", string(output))
 		return err
 	}
+	return nil
+}
+
+// --- NEW HELPER: GOOGLE TTS (FREE) ---
+func downloadGoogleTTS(text, outFile string) error {
+	// Google TTS URL (Unofficial but widely used)
+	safeText := url.QueryEscape(text)
+	// Truncate text if too long to avoid URL limits (basic safety)
+	if len(safeText) > 1000 { safeText = safeText[:1000] }
+	
+	ttsUrl := fmt.Sprintf("https://translate.google.com/translate_tts?ie=UTF-8&q=%s&tl=en&client=tw-ob", safeText)
+
+	req, _ := http.NewRequest("GET", ttsUrl, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0") // Pretend to be a browser
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return err }
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("Google TTS rejected request: %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(outFile)
+	if err != nil { return err }
+	defer out.Close()
+
+	io.Copy(out, resp.Body)
 	return nil
 }
 
@@ -323,7 +331,7 @@ func stitchVideos(files []string, outputFile string) error {
 
 // --- 4. HELPERS ---
 func downloadTMDBPoster(query string, destinationPath string) error {
-	apiKey := os.Getenv("TMDB_API_KEY") 
+	apiKey := os.Getenv("TMDB_API_KEY")
 	if apiKey == "" { apiKey = os.Getenv("TMDB_API_TOKEN") }
 	if apiKey == "" { return fmt.Errorf("missing API key") }
 
@@ -335,9 +343,7 @@ func downloadTMDBPoster(query string, destinationPath string) error {
 	if err != nil { return err }
 	defer res.Body.Close()
 
-	if res.StatusCode != 200 {
-		return fmt.Errorf("status %d", res.StatusCode)
-	}
+	if res.StatusCode != 200 { return fmt.Errorf("status %d", res.StatusCode) }
 
 	var result TMDBSearchResponse
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil { return err }
@@ -349,9 +355,9 @@ func downloadTMDBPoster(query string, destinationPath string) error {
 }
 
 func downloadPlaceholder(text, destinationPath, videoType string) {
-	dims := "1080x1920" 
+	dims := "1080x1920"
 	if videoType == "long" { dims = "1920x1080" }
-	
+
 	safe := url.QueryEscape(text)
 	url := fmt.Sprintf("https://placehold.co/%s/111/FFF/png?text=%s", dims, safe)
 	downloadFile(url, destinationPath)
