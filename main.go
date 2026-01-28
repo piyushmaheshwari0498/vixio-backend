@@ -48,7 +48,7 @@ func main() {
 		topic := c.PostForm("topic")
 		category := c.PostForm("category")
 		
-		// 1. FIX: Normalize Input (Remove spaces, lowercase) to fix "Short vs Long" bug
+		// 1. FIX: Clean the input so "Long" or "long " matches "long"
 		videoType := strings.ToLower(strings.TrimSpace(c.PostForm("type")))
 		if videoType == "" { videoType = "short" }
 
@@ -178,14 +178,22 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		itemsContext += fmt.Sprintf("\nItem %d: %s\nDetails: %s\n", i+1, name, s.Details)
 	}
 
+	// 2. FIX: Dynamic Instructions based on videoType
+	lengthInstruction := "Keep it snappy (1-2 sentences per item). Fast paced."
+	if videoType == "long" {
+		lengthInstruction = "Write a detailed explanation (4-5 sentences per item). Go into depth and make it longer."
+	}
+
 	prompt := fmt.Sprintf(`
 	Topic: "%s" (%s mode)
-	Create a video script for %d items.
+	Constraint: %s
+	
 	INPUT ITEMS:
 	%s
+
 	RETURN JSON ONLY:
 	{"intro": "Hook", "items": ["Script 1", "Script 2"], "outro": "Conclusion"}
-	`, topic, videoType, len(scenes), itemsContext)
+	`, topic, videoType, lengthInstruction, itemsContext)
 
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
@@ -206,7 +214,7 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	return result, nil
 }
 
-// --- 2. RENDER ENGINE (FIXED: Force 30FPS + Low Memory) ---
+// --- 2. RENDER ENGINE ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
 	if err := downloadGoogleTTS(text, audioPath); err != nil {
@@ -214,8 +222,11 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 	os.Remove(outputPath)
 
-	// Scale Logic
+	// 3. FIX: Resolution Logic with Input Cleaning check
+	// Short = 1080x1920 (Portrait)
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+	
+	// Long = 1920x1080 (Landscape)
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	}
@@ -224,13 +235,11 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	isVideo := ext == ".mp4" || ext == ".mov" || ext == ".avi"
 	var cmd *exec.Cmd
 
-	// 2. FIX: Added "-r 30" to BOTH commands to force 30 FPS.
-	// This prevents the "Exit 183" stitching crash.
 	if isVideo {
 		cmd = exec.Command("ffmpeg", "-stream_loop", "-1", "-i", mediaPath, "-i", audioPath,
 			"-map", "0:v", "-map", "1:a", 
 			"-vf", scale, 
-			"-r", "30",                 // <--- CRITICAL FIX: Force 30 FPS
+			"-r", "30",                 
 			"-threads", "1", 
 			"-c:v", "libx264", "-preset", "ultrafast", 
 			"-c:a", "aac", "-b:a", "128k", 
@@ -238,7 +247,7 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	} else {
 		cmd = exec.Command("ffmpeg", "-loop", "1", "-i", mediaPath, "-i", audioPath,
 			"-vf", scale, 
-			"-r", "30",                 // <--- CRITICAL FIX: Force 30 FPS
+			"-r", "30",                 
 			"-threads", "1",
 			"-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", 
 			"-c:a", "aac", "-b:a", "128k", 
@@ -254,15 +263,13 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	return nil
 }
 
-// --- 3. STITCHER (FIXED: Overwrite File) ---
+// --- 3. STITCHER ---
 func stitchVideos(files []string, outputFile string) error {
 	listFile, _ := os.Create("output/list.txt")
 	for _, f := range files { listFile.WriteString(fmt.Sprintf("file '%s'\n", filepath.Base(f))) }
 	listFile.Close()
 
 	os.Remove(outputFile) 
-	
-	// 3. FIX: Added "-y" to force overwrite existing files
 	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile)
 	
 	output, err := cmd.CombinedOutput()
