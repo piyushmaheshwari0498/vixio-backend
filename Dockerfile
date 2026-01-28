@@ -1,5 +1,5 @@
 # Start with a lightweight Go image
-FROM golang:1.23-alpine
+FROM golang:1.25-alpine
 
 # Install FFmpeg (Required for video processing)
 RUN apk update && apk add --no-cache ffmpeg
