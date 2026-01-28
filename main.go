@@ -18,7 +18,7 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-// Data Structures
+// --- DATA STRUCTURES ---
 type SceneData struct {
 	Name    string `json:"name"`
 	Details string `json:"details"`
@@ -87,11 +87,9 @@ func main() {
 
 			// Try TMDB if it's a scene
 			if tryTMDB && category == "movie" && fallbackName != "" {
-				// fmt.Printf("🔎 TMDB Search: %s\n", fallbackName)
 				if err := downloadTMDBPoster(fallbackName, savePath); err == nil {
 					return savePath
 				}
-				// fmt.Println("⚠️ TMDB Failed, using placeholder.")
 			}
 
 			// Placeholder
@@ -119,8 +117,8 @@ func main() {
 			return
 		}
 
-		// --- 5. RENDER SEGMENTS (Using Google TTS) ---
-		fmt.Println("🔹 STEP 3: Rendering Segments (Google TTS + FFmpeg)...") // DEBUG
+		// --- 5. RENDER SEGMENTS (Google TTS + Low Memory FFmpeg) ---
+		fmt.Println("🔹 STEP 3: Rendering Segments...") // DEBUG
 		var segmentFiles []string
 
 		// Render Intro
@@ -227,7 +225,7 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	return result, nil
 }
 
-// --- 2. RENDER ENGINE (Using Free Google TTS) ---
+// --- 2. RENDER ENGINE (Memory Optimized + Free TTS) ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	// 1. Generate Audio using Google TTS (Free)
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
@@ -253,25 +251,30 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	var cmd *exec.Cmd
 
 	if isVideo {
-		// Video Logic
+		// Video Logic: Low Memory Mode
 		cmd = exec.Command("ffmpeg",
 			"-stream_loop", "-1", "-i", mediaPath, // Video input
 			"-i", audioPath,                       // Audio input
 			"-map", "0:v", "-map", "1:a",
 			"-vf", scale,
-			"-c:v", "libx264", "-preset", "fast",
-			"-c:a", "aac", "-b:a", "192k",
+			"-threads", "1",             // <--- LIMIT THREADS (Saves RAM)
+			"-c:v", "libx264", 
+			"-preset", "ultrafast",      // <--- FASTER & LESS RAM
+			"-c:a", "aac", "-b:a", "128k",
 			"-shortest",
 			outputPath,
 		)
 	} else {
-		// Image Logic
+		// Image Logic: Low Memory Mode
 		cmd = exec.Command("ffmpeg",
 			"-loop", "1", "-i", mediaPath, // Image input
 			"-i", audioPath,               // Audio input
 			"-vf", scale,
-			"-c:v", "libx264", "-tune", "stillimage",
-			"-c:a", "aac", "-b:a", "192k",
+			"-threads", "1",             // <--- LIMIT THREADS
+			"-c:v", "libx264", 
+			"-tune", "stillimage",
+			"-preset", "ultrafast",      // <--- FASTER & LESS RAM
+			"-c:a", "aac", "-b:a", "128k",
 			"-shortest",
 			outputPath,
 		)
