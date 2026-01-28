@@ -103,11 +103,10 @@ func main() {
 			return
 		}
 		
-		// SAFETY CHECK: Ensure we have enough script items for the scenes
+		// Padding check
 		if len(scriptData.Items) < len(scenes) {
-		    fmt.Println("⚠️ Warning: AI returned fewer items than requested. Padding with generic text.")
 		    for len(scriptData.Items) < len(scenes) {
-		        scriptData.Items = append(scriptData.Items, "Here is another amazing item.")
+		        scriptData.Items = append(scriptData.Items, "Here is another item.")
 		    }
 		}
 
@@ -125,7 +124,6 @@ func main() {
 		for i, itemScript := range scriptData.Items {
 			if i >= len(scenePaths) { break }
 			segPath := fmt.Sprintf("output/seg_%d.mp4", i)
-			// Use the simpler plain text script
 			if err := renderSegment(itemScript, scenePaths[i], segPath, videoType); err == nil {
 				segmentFiles = append(segmentFiles, segPath)
 			}
@@ -163,7 +161,7 @@ func main() {
 	r.Run(":" + port)
 }
 
-// --- 1. AI BRAIN (UPDATED PROMPT) ---
+// --- 1. AI BRAIN ---
 func generateSegmentedScript(topic, category, videoType string, scenes []SceneData) (ScriptResponse, error) {
 	apiKey := os.Getenv("GROQ_API_KEY")
 	if apiKey == "" { return ScriptResponse{}, fmt.Errorf("missing GROQ_API_KEY") }
@@ -179,26 +177,13 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		itemsContext += fmt.Sprintf("\nItem %d: %s\nDetails: %s\n", i+1, name, s.Details)
 	}
 
-	// UPDATED PROMPT: Forces strictly simple strings
 	prompt := fmt.Sprintf(`
 	Topic: "%s" (%s mode)
 	Create a video script for %d items.
-	
 	INPUT ITEMS:
 	%s
-
-	IMPORTANT JSON RULES:
-	1. "items" MUST be a simple list of strings. 
-	2. Do NOT use objects inside "items". 
-	3. Example: ["This is item 1 script.", "This is item 2 script."]
-	4. Do NOT include titles like "Item 1: ...", just the spoken script.
-
 	RETURN JSON ONLY:
-	{
-		"intro": "Hook",
-		"items": ["Script for Item 1", "Script for Item 2", "Script for Item 3..."],
-		"outro": "Conclusion"
-	}
+	{"intro": "Hook", "items": ["Script 1", "Script 2"], "outro": "Conclusion"}
 	`, topic, videoType, len(scenes), itemsContext)
 
 	resp, err := client.CreateChatCompletion(
@@ -214,14 +199,13 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	var result ScriptResponse
 	clean := strings.ReplaceAll(resp.Choices[0].Message.Content, "```json", "")
 	clean = strings.ReplaceAll(clean, "```", "")
-
 	if err := json.Unmarshal([]byte(clean), &result); err != nil {
-		return ScriptResponse{}, fmt.Errorf("json parse error: %v. Raw AI: %s", err, clean)
+		return ScriptResponse{}, fmt.Errorf("json parse error")
 	}
 	return result, nil
 }
 
-// --- 2. RENDER ENGINE (Free TTS + Optimized) ---
+// --- 2. RENDER ENGINE (Robust 30FPS + Low Memory) ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
 	if err := downloadGoogleTTS(text, audioPath); err != nil {
@@ -229,6 +213,7 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 	os.Remove(outputPath)
 
+	// Scale + Force 30 FPS + Format
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
@@ -240,12 +225,21 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 
 	if isVideo {
 		cmd = exec.Command("ffmpeg", "-stream_loop", "-1", "-i", mediaPath, "-i", audioPath,
-			"-map", "0:v", "-map", "1:a", "-vf", scale, "-threads", "1",
-			"-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "128k", "-shortest", outputPath)
+			"-map", "0:v", "-map", "1:a", 
+			"-vf", scale, 
+			"-r", "30",                 // <--- NEW: Force 30 FPS
+			"-threads", "1", 
+			"-c:v", "libx264", "-preset", "ultrafast", 
+			"-c:a", "aac", "-b:a", "128k", 
+			"-shortest", outputPath)
 	} else {
 		cmd = exec.Command("ffmpeg", "-loop", "1", "-i", mediaPath, "-i", audioPath,
-			"-vf", scale, "-threads", "1",
-			"-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "128k", "-shortest", outputPath)
+			"-vf", scale, 
+			"-r", "30",                 // <--- NEW: Force 30 FPS
+			"-threads", "1",
+			"-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", 
+			"-c:a", "aac", "-b:a", "128k", 
+			"-shortest", outputPath)
 	}
 
 	output, err := cmd.CombinedOutput()
@@ -257,31 +251,41 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	return nil
 }
 
+// --- 3. STITCHER (Debug Enabled) ---
+func stitchVideos(files []string, outputFile string) error {
+	listFile, _ := os.Create("output/list.txt")
+	for _, f := range files { listFile.WriteString(fmt.Sprintf("file '%s'\n", filepath.Base(f))) }
+	listFile.Close()
+
+	os.Remove(outputFile) // Attempt delete
+	
+	// Added "-y" to force overwrite if file is locked/exists
+	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile)
+	
+	// Capture output to see WHY it fails (183)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("Stitch Error: %v | Log: %s", err, string(output))
+	}
+	return nil
+}
+
+// --- 4. HELPERS ---
 func downloadGoogleTTS(text, outFile string) error {
 	safeText := url.QueryEscape(text)
 	if len(safeText) > 1000 { safeText = safeText[:1000] }
 	ttsUrl := fmt.Sprintf("https://translate.google.com/translate_tts?ie=UTF-8&q=%s&tl=en&client=tw-ob", safeText)
-
 	req, _ := http.NewRequest("GET", ttsUrl, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil { return err }
 	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 { return fmt.Errorf("Google TTS rejected: %d", resp.StatusCode) }
 	out, err := os.Create(outFile)
 	if err != nil { return err }
 	defer out.Close()
 	io.Copy(out, resp.Body)
 	return nil
-}
-
-func stitchVideos(files []string, outputFile string) error {
-	listFile, _ := os.Create("output/list.txt")
-	for _, f := range files { listFile.WriteString(fmt.Sprintf("file '%s'\n", filepath.Base(f))) }
-	listFile.Close()
-	os.Remove(outputFile)
-	return exec.Command("ffmpeg", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile).Run()
 }
 
 func downloadTMDBPoster(query string, dest string) error {
