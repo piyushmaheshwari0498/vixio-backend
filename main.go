@@ -23,10 +23,16 @@ type SceneData struct {
 	Details string `json:"details"`
 }
 
+// FIX 1: Create a struct for the items so we can handle Title/Details objects
+type ScriptItem struct {
+	Title   string `json:"title"`
+	Details string `json:"details"`
+}
+
 type ScriptResponse struct {
-	Intro string   `json:"intro"`
-	Items []string `json:"items"`
-	Outro string   `json:"outro"`
+	Intro string       `json:"intro"`
+	Items []ScriptItem `json:"items"` // FIX 2: Changed from []string to []ScriptItem
+	Outro string       `json:"outro"`
 }
 
 type TMDBSearchResponse struct {
@@ -48,7 +54,6 @@ func main() {
 		topic := c.PostForm("topic")
 		category := c.PostForm("category")
 		
-		// 1. FIX: Clean the input so "Long" or "long " matches "long"
 		videoType := strings.ToLower(strings.TrimSpace(c.PostForm("type")))
 		if videoType == "" { videoType = "short" }
 
@@ -82,7 +87,6 @@ func main() {
 
 			txt := fallbackName
 			if txt == "" { txt = "Scene" }
-			// FIX: Pass videoType here
 			downloadPlaceholder(txt, savePath, videoType)
 			return savePath
 		}
@@ -108,7 +112,11 @@ func main() {
 		// Padding check
 		if len(scriptData.Items) < len(scenes) {
 			for len(scriptData.Items) < len(scenes) {
-				scriptData.Items = append(scriptData.Items, "Here is another item.")
+				// Fill with generic item if AI returned too few
+				scriptData.Items = append(scriptData.Items, ScriptItem{
+					Title: "Extra Item", 
+					Details: "Here is another item related to the topic.",
+				})
 			}
 		}
 
@@ -123,10 +131,16 @@ func main() {
 		}
 
 		// Render Scenes
-		for i, itemScript := range scriptData.Items {
+		// FIX 3: Iterate over the struct items
+		for i, item := range scriptData.Items {
 			if i >= len(scenePaths) { break }
 			segPath := fmt.Sprintf("output/seg_%d.mp4", i)
-			if err := renderSegment(itemScript, scenePaths[i], segPath, videoType); err == nil {
+			
+			// We use item.Details for the speech text
+			textToSpeak := item.Details
+			// Optional: textToSpeak = item.Title + ". " + item.Details
+
+			if err := renderSegment(textToSpeak, scenePaths[i], segPath, videoType); err == nil {
 				segmentFiles = append(segmentFiles, segPath)
 			}
 		}
@@ -179,12 +193,12 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		itemsContext += fmt.Sprintf("\nItem %d: %s\nDetails: %s\n", i+1, name, s.Details)
 	}
 
-	// 2. FIX: Dynamic Instructions based on videoType
-	lengthInstruction := "Keep it snappy (1-2 sentences per item). Fast paced."
+	lengthInstruction := "Keep it snappy (1-2 sentences per item)."
 	if videoType == "long" {
-		lengthInstruction = "Write a detailed explanation (4-5 sentences per item). Go into depth and make it longer."
+		lengthInstruction = "Write a detailed explanation (4-5 sentences per item)."
 	}
 
+	// FIX 4: Updated Prompt to explicitly ask for Objects, matching the new Go struct
 	prompt := fmt.Sprintf(`
 	Topic: "%s" (%s mode)
 	Constraint: %s
@@ -192,8 +206,15 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	INPUT ITEMS:
 	%s
 
-	RETURN JSON ONLY:
-	{"intro": "Hook", "items": ["Script 1", "Script 2"], "outro": "Conclusion"}
+	RETURN JSON ONLY (No markdown):
+	{
+		"intro": "Hook",
+		"items": [
+			{ "title": "Item 1 Title", "details": "Spoken text for item 1..." },
+			{ "title": "Item 2 Title", "details": "Spoken text for item 2..." }
+		],
+		"outro": "Conclusion"
+	}
 	`, topic, videoType, lengthInstruction, itemsContext)
 
 	resp, err := client.CreateChatCompletion(
@@ -209,8 +230,8 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	var result ScriptResponse
 	clean := strings.ReplaceAll(resp.Choices[0].Message.Content, "```json", "")
 	clean = strings.ReplaceAll(clean, "```", "")
+	
 	if err := json.Unmarshal([]byte(clean), &result); err != nil {
-		// Log the raw response if parsing fails
 		fmt.Printf("❌ Failed JSON: %s\n", clean)
 		return ScriptResponse{}, fmt.Errorf("json parse error")
 	}
@@ -225,11 +246,8 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 	os.Remove(outputPath)
 
-	// 3. FIX: Resolution Logic with Input Cleaning check
-	// Short = 1080x1920 (Portrait)
+	// Resolution Logic
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
-	
-	// Long = 1920x1080 (Landscape)
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	}
@@ -315,7 +333,6 @@ func downloadTMDBPoster(query string, dest string) error {
 	return downloadFile("https://image.tmdb.org/t/p/original"+res.Results[0].PosterPath, dest)
 }
 
-// Fix: Add videoType parameter to function signature
 func downloadPlaceholder(text, dest, vType string) {
 	dims := "1080x1920"
 	if vType == "long" { dims = "1920x1080" }
