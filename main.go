@@ -23,7 +23,6 @@ type SceneData struct {
 	Details string `json:"details"`
 }
 
-// FIX 1: Create a struct for the items so we can handle Title/Details objects
 type ScriptItem struct {
 	Title   string `json:"title"`
 	Details string `json:"details"`
@@ -31,7 +30,7 @@ type ScriptItem struct {
 
 type ScriptResponse struct {
 	Intro string       `json:"intro"`
-	Items []ScriptItem `json:"items"` // FIX 2: Changed from []string to []ScriptItem
+	Items []ScriptItem `json:"items"`
 	Outro string       `json:"outro"`
 }
 
@@ -112,7 +111,6 @@ func main() {
 		// Padding check
 		if len(scriptData.Items) < len(scenes) {
 			for len(scriptData.Items) < len(scenes) {
-				// Fill with generic item if AI returned too few
 				scriptData.Items = append(scriptData.Items, ScriptItem{
 					Title: "Extra Item", 
 					Details: "Here is another item related to the topic.",
@@ -128,20 +126,22 @@ func main() {
 		introVid := "output/seg_intro.mp4"
 		if err := renderSegment(scriptData.Intro, introPath, introVid, videoType); err == nil {
 			segmentFiles = append(segmentFiles, introVid)
+		} else {
+			fmt.Printf("⚠️ Warning: Intro render failed: %v\n", err)
 		}
 
 		// Render Scenes
-		// FIX 3: Iterate over the struct items
 		for i, item := range scriptData.Items {
 			if i >= len(scenePaths) { break }
 			segPath := fmt.Sprintf("output/seg_%d.mp4", i)
 			
-			// We use item.Details for the speech text
+			// Use details for speech
 			textToSpeak := item.Details
-			// Optional: textToSpeak = item.Title + ". " + item.Details
 
 			if err := renderSegment(textToSpeak, scenePaths[i], segPath, videoType); err == nil {
 				segmentFiles = append(segmentFiles, segPath)
+			} else {
+				fmt.Printf("⚠️ Warning: Scene %d failed: %v\n", i, err)
 			}
 		}
 
@@ -149,6 +149,8 @@ func main() {
 		outroVid := "output/seg_outro.mp4"
 		if err := renderSegment(scriptData.Outro, outroPath, outroVid, videoType); err == nil {
 			segmentFiles = append(segmentFiles, outroVid)
+		} else {
+			fmt.Printf("⚠️ Warning: Outro render failed: %v\n", err)
 		}
 
 		// --- STITCH ---
@@ -198,15 +200,12 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		lengthInstruction = "Write a detailed explanation (4-5 sentences per item)."
 	}
 
-	// FIX 4: Updated Prompt to explicitly ask for Objects, matching the new Go struct
 	prompt := fmt.Sprintf(`
 	Topic: "%s" (%s mode)
 	Constraint: %s
-	
 	INPUT ITEMS:
 	%s
-
-	RETURN JSON ONLY (No markdown):
+	RETURN JSON ONLY:
 	{
 		"intro": "Hook",
 		"items": [
@@ -241,6 +240,8 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 // --- 2. RENDER ENGINE ---
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
+	
+	// FIX: Use the improved GTX downloader
 	if err := downloadGoogleTTS(text, audioPath); err != nil {
 		return fmt.Errorf("Google TTS failed: %v", err)
 	}
@@ -284,13 +285,25 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	return nil
 }
 
-// --- 3. STITCHER ---
+// --- 3. STITCHER (FIXED) ---
 func stitchVideos(files []string, outputFile string) error {
-	listFile, _ := os.Create("output/list.txt")
-	for _, f := range files { listFile.WriteString(fmt.Sprintf("file '%s'\n", filepath.Base(f))) }
+	// FIX: Safety check for empty list
+	if len(files) == 0 {
+		return fmt.Errorf("no video segments were created")
+	}
+
+	listFile, err := os.Create("output/list.txt")
+	if err != nil { return err }
+
+	// FIX: Use Absolute Paths to prevent "Invalid Data" error
+	for _, f := range files {
+		absPath, _ := filepath.Abs(f)
+		listFile.WriteString(fmt.Sprintf("file '%s'\n", absPath))
+	}
 	listFile.Close()
 
 	os.Remove(outputFile) 
+	
 	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile)
 	
 	output, err := cmd.CombinedOutput()
@@ -300,26 +313,23 @@ func stitchVideos(files []string, outputFile string) error {
 	return nil
 }
 
-// --- 4. HELPERS ---
-// --- 4. HELPERS ---
+// --- 4. HELPERS (FIXED TTS) ---
 func downloadGoogleTTS(text, outFile string) error {
     safeText := url.QueryEscape(text)
     
-    // 1. Check length. If too long for one request, we truncate to avoid crash.
-    // (GTX allows ~800-1000 chars. 4-5 sentences is usually safe here)
+    // 1. Safety limit
     if len(safeText) > 1000 { safeText = safeText[:1000] }
 
-    // 2. USE "GTX" CLIENT (Better for longer text than 'tw-ob')
+    // 2. USE "GTX" CLIENT (Allows longer text)
     ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
 
     req, _ := http.NewRequest("GET", ttsUrl, nil)
-    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    req.Header.Set("User-Agent", "Mozilla/5.0")
     
     resp, err := http.DefaultClient.Do(req)
     if err != nil { return err }
     defer resp.Body.Close()
 
-    // 3. Check for specific Google errors
     if resp.StatusCode != 200 {
         return fmt.Errorf("Google TTS rejected text (too long?): %d", resp.StatusCode)
     }
