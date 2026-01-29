@@ -301,21 +301,35 @@ func stitchVideos(files []string, outputFile string) error {
 }
 
 // --- 4. HELPERS ---
+// --- 4. HELPERS ---
 func downloadGoogleTTS(text, outFile string) error {
-	safeText := url.QueryEscape(text)
-	if len(safeText) > 1000 { safeText = safeText[:1000] }
-	ttsUrl := fmt.Sprintf("https://translate.google.com/translate_tts?ie=UTF-8&q=%s&tl=en&client=tw-ob", safeText)
-	req, _ := http.NewRequest("GET", ttsUrl, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 { return fmt.Errorf("Google TTS rejected: %d", resp.StatusCode) }
-	out, err := os.Create(outFile)
-	if err != nil { return err }
-	defer out.Close()
-	io.Copy(out, resp.Body)
-	return nil
+    safeText := url.QueryEscape(text)
+    
+    // 1. Check length. If too long for one request, we truncate to avoid crash.
+    // (GTX allows ~800-1000 chars. 4-5 sentences is usually safe here)
+    if len(safeText) > 1000 { safeText = safeText[:1000] }
+
+    // 2. USE "GTX" CLIENT (Better for longer text than 'tw-ob')
+    ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
+
+    req, _ := http.NewRequest("GET", ttsUrl, nil)
+    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil { return err }
+    defer resp.Body.Close()
+
+    // 3. Check for specific Google errors
+    if resp.StatusCode != 200 {
+        return fmt.Errorf("Google TTS rejected text (too long?): %d", resp.StatusCode)
+    }
+
+    out, err := os.Create(outFile)
+    if err != nil { return err }
+    defer out.Close()
+
+    io.Copy(out, resp.Body)
+    return nil
 }
 
 func downloadTMDBPoster(query string, dest string) error {
