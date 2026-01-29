@@ -48,7 +48,7 @@ func main() {
 		topic := c.PostForm("topic")
 		category := c.PostForm("category")
 		
-		// 1. Clean Input
+		// 1. FIX: Clean the input so "Long" or "long " matches "long"
 		videoType := strings.ToLower(strings.TrimSpace(c.PostForm("type")))
 		if videoType == "" { videoType = "short" }
 
@@ -82,6 +82,7 @@ func main() {
 
 			txt := fallbackName
 			if txt == "" { txt = "Scene" }
+			// FIX: Pass videoType here
 			downloadPlaceholder(txt, savePath, videoType)
 			return savePath
 		}
@@ -162,7 +163,7 @@ func main() {
 	r.Run(":" + port)
 }
 
-// --- 1. AI BRAIN (FIXED PROMPT) ---
+// --- 1. AI BRAIN ---
 func generateSegmentedScript(topic, category, videoType string, scenes []SceneData) (ScriptResponse, error) {
 	apiKey := os.Getenv("GROQ_API_KEY")
 	if apiKey == "" { return ScriptResponse{}, fmt.Errorf("missing GROQ_API_KEY") }
@@ -178,12 +179,12 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		itemsContext += fmt.Sprintf("\nItem %d: %s\nDetails: %s\n", i+1, name, s.Details)
 	}
 
-	lengthInstruction := "Keep it snappy (1-2 sentences per item)."
+	// 2. FIX: Dynamic Instructions based on videoType
+	lengthInstruction := "Keep it snappy (1-2 sentences per item). Fast paced."
 	if videoType == "long" {
-		lengthInstruction = "Write a detailed explanation (4-5 sentences per item). Go into depth."
+		lengthInstruction = "Write a detailed explanation (4-5 sentences per item). Go into depth and make it longer."
 	}
 
-	// 2. FIX: STRICT JSON INSTRUCTIONS
 	prompt := fmt.Sprintf(`
 	Topic: "%s" (%s mode)
 	Constraint: %s
@@ -191,17 +192,8 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	INPUT ITEMS:
 	%s
 
-	IMPORTANT JSON RULES:
-	1. "items" MUST be a simple list of strings. 
-	2. Do NOT use objects (like {"title": "..."}) inside the "items" array.
-	3. Just give me the raw spoken text for each item.
-
 	RETURN JSON ONLY:
-	{
-		"intro": "Hook",
-		"items": ["Spoken text for item 1", "Spoken text for item 2", "Spoken text for item 3"],
-		"outro": "Conclusion"
-	}
+	{"intro": "Hook", "items": ["Script 1", "Script 2"], "outro": "Conclusion"}
 	`, topic, videoType, lengthInstruction, itemsContext)
 
 	resp, err := client.CreateChatCompletion(
@@ -217,11 +209,10 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 	var result ScriptResponse
 	clean := strings.ReplaceAll(resp.Choices[0].Message.Content, "```json", "")
 	clean = strings.ReplaceAll(clean, "```", "")
-	
-	// 3. FIX: Debugging Log if JSON fails
 	if err := json.Unmarshal([]byte(clean), &result); err != nil {
-		fmt.Printf("\n❌ RAW AI RESPONSE (Failed to Parse):\n%s\n", clean) // This will show in logs if it fails
-		return ScriptResponse{}, fmt.Errorf("json parse error: %v", err)
+		// Log the raw response if parsing fails
+		fmt.Printf("❌ Failed JSON: %s\n", clean)
+		return ScriptResponse{}, fmt.Errorf("json parse error")
 	}
 	return result, nil
 }
@@ -234,8 +225,11 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 	os.Remove(outputPath)
 
-	// Resolution Logic
+	// 3. FIX: Resolution Logic with Input Cleaning check
+	// Short = 1080x1920 (Portrait)
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+	
+	// Long = 1920x1080 (Landscape)
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	}
@@ -321,9 +315,10 @@ func downloadTMDBPoster(query string, dest string) error {
 	return downloadFile("https://image.tmdb.org/t/p/original"+res.Results[0].PosterPath, dest)
 }
 
+// Fix: Add videoType parameter to function signature
 func downloadPlaceholder(text, dest, vType string) {
 	dims := "1080x1920"
-	if videoType == "long" { dims = "1920x1080" }
+	if vType == "long" { dims = "1920x1080" }
 	safe := url.QueryEscape(text)
 	downloadFile(fmt.Sprintf("https://placehold.co/%s/111/FFF/png?text=%s", dims, safe), dest)
 }
