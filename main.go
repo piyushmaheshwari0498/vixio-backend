@@ -111,10 +111,7 @@ func main() {
 		// Padding check
 		if len(scriptData.Items) < len(scenes) {
 			for len(scriptData.Items) < len(scenes) {
-				scriptData.Items = append(scriptData.Items, ScriptItem{
-					Title: "Extra Item", 
-					Details: "Here is another item related to the topic.",
-				})
+				scriptData.Items = append(scriptData.Items, ScriptItem{Title: "Extra Item", Details: "Here is another item."})
 			}
 		}
 
@@ -134,8 +131,6 @@ func main() {
 		for i, item := range scriptData.Items {
 			if i >= len(scenePaths) { break }
 			segPath := fmt.Sprintf("output/seg_%d.mp4", i)
-			
-			// Use details for speech
 			textToSpeak := item.Details
 
 			if err := renderSegment(textToSpeak, scenePaths[i], segPath, videoType); err == nil {
@@ -197,7 +192,7 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 
 	lengthInstruction := "Keep it snappy (1-2 sentences per item)."
 	if videoType == "long" {
-		lengthInstruction = "Write a detailed explanation (4-5 sentences per item)."
+		lengthInstruction = "Write a detailed explanation (3-4 sentences per item)."
 	}
 
 	prompt := fmt.Sprintf(`
@@ -241,13 +236,12 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
 	
-	// FIX: Use the improved GTX downloader
-	if err := downloadGoogleTTS(text, audioPath); err != nil {
+	// FIX: Use the CHUNKED downloader
+	if err := downloadGoogleTTS_Smart(text, audioPath); err != nil {
 		return fmt.Errorf("Google TTS failed: %v", err)
 	}
 	os.Remove(outputPath)
 
-	// Resolution Logic
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	if videoType == "long" {
 		scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
@@ -285,61 +279,66 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	return nil
 }
 
-// --- 3. STITCHER (FIXED) ---
+// --- 3. STITCHER ---
 func stitchVideos(files []string, outputFile string) error {
-	// FIX: Safety check for empty list
-	if len(files) == 0 {
-		return fmt.Errorf("no video segments were created")
-	}
-
-	listFile, err := os.Create("output/list.txt")
-	if err != nil { return err }
-
-	// FIX: Use Absolute Paths to prevent "Invalid Data" error
+	if len(files) == 0 { return fmt.Errorf("no video segments were created") }
+	listFile, _ := os.Create("output/list.txt")
 	for _, f := range files {
 		absPath, _ := filepath.Abs(f)
 		listFile.WriteString(fmt.Sprintf("file '%s'\n", absPath))
 	}
 	listFile.Close()
-
 	os.Remove(outputFile) 
-	
 	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "output/list.txt", "-c", "copy", outputFile)
-	
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Stitch Error: %v | Log: %s", err, string(output))
-	}
+	if err != nil { return fmt.Errorf("Stitch Error: %v | Log: %s", err, string(output)) }
 	return nil
 }
 
-// --- 4. HELPERS (FIXED TTS) ---
-func downloadGoogleTTS(text, outFile string) error {
-    safeText := url.QueryEscape(text)
-    
-    // 1. Safety limit
-    if len(safeText) > 1000 { safeText = safeText[:1000] }
+// --- 4. HELPERS (SMART CHUNKED TTS) ---
+func downloadGoogleTTS_Smart(text, outFile string) error {
+	// 1. Create the final file
+	finalFile, err := os.Create(outFile)
+	if err != nil { return err }
+	defer finalFile.Close()
 
-    // 2. USE "GTX" CLIENT (Allows longer text)
-    ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
+	// 2. Split text into sentences to avoid "400 Bad Request"
+	// We split by "." and "!" and "?"
+	// Simple approach: Replace ! and ? with . then split by .
+	cleanText := strings.ReplaceAll(text, "!", ".")
+	cleanText = strings.ReplaceAll(cleanText, "?", ".")
+	sentences := strings.Split(cleanText, ".")
 
-    req, _ := http.NewRequest("GET", ttsUrl, nil)
-    req.Header.Set("User-Agent", "Mozilla/5.0")
-    
-    resp, err := http.DefaultClient.Do(req)
-    if err != nil { return err }
-    defer resp.Body.Close()
+	for _, sentence := range sentences {
+		sentence = strings.TrimSpace(sentence)
+		if len(sentence) < 2 { continue } // Skip empty junk
 
-    if resp.StatusCode != 200 {
-        return fmt.Errorf("Google TTS rejected text (too long?): %d", resp.StatusCode)
-    }
+		// 3. Download this sentence
+		safeText := url.QueryEscape(sentence)
+		ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
 
-    out, err := os.Create(outFile)
-    if err != nil { return err }
-    defer out.Close()
+		req, _ := http.NewRequest("GET", ttsUrl, nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil { 
+			fmt.Println("TTS Network Error:", err)
+			continue 
+		}
+		
+		if resp.StatusCode != 200 {
+			fmt.Printf("TTS Error: %d for '%s'\n", resp.StatusCode, sentence)
+			resp.Body.Close()
+			continue
+		}
 
-    io.Copy(out, resp.Body)
-    return nil
+		// 4. Append MP3 bytes to the final file
+		// (MP3s can be concatenated just by appending bytes!)
+		io.Copy(finalFile, resp.Body)
+		resp.Body.Close()
+	}
+	
+	return nil
 }
 
 func downloadTMDBPoster(query string, dest string) error {
