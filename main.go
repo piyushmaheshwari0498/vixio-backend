@@ -190,26 +190,47 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 		itemsContext += fmt.Sprintf("\nItem %d: %s\nDetails: %s\n", i+1, name, s.Details)
 	}
 
-	lengthInstruction := "Keep it snappy (1-2 sentences per item)."
-	if videoType == "long" {
-		lengthInstruction = "Write a detailed explanation (3-4 sentences per item)."
-	}
+	// lengthInstruction := "Keep it snappy (1-2 sentences per item)."
+	// if videoType == "long" {
+	// 	lengthInstruction = "Write a detailed explanation (3-4 sentences per item)."
+	// }
 
-	prompt := fmt.Sprintf(`
-	Topic: "%s" (%s mode)
-	Constraint: %s
-	INPUT ITEMS:
-	%s
-	RETURN JSON ONLY:
-	{
-		"intro": "Hook",
-		"items": [
-			{ "title": "Item 1 Title", "details": "Spoken text for item 1..." },
-			{ "title": "Item 2 Title", "details": "Spoken text for item 2..." }
-		],
-		"outro": "Conclusion"
-	}
-	`, topic, videoType, lengthInstruction, itemsContext)
+	// prompt := fmt.Sprintf(`
+	// Topic: "%s" (%s mode)
+	// Constraint: %s
+	// INPUT ITEMS:
+	// %s
+	// RETURN JSON ONLY:
+	// {
+	// 	"intro": "Hook",
+	// 	"items": [
+	// 		{ "title": "Item 1 Title", "details": "Spoken text for item 1..." },
+	// 		{ "title": "Item 2 Title", "details": "Spoken text for item 2..." }
+	// 	],
+	// 	"outro": "Conclusion"
+	// }
+	// `, topic, videoType, lengthInstruction, itemsContext)
+
+	lengthInstruction := "Keep it snappy (max 25 words per item)."
+    if videoType == "long" {
+        lengthInstruction = "Write a professional detailed explanation (max 60 words per item)."
+    }
+
+    prompt := fmt.Sprintf(`
+    Topic: "%s" (%s mode)
+    Tone: Engaging and clear.
+    Constraint: %s. Use simple language.
+    INPUT ITEMS:
+    %s
+    RETURN JSON ONLY:
+    {
+        "intro": "Short hook",
+        "items": [
+            { "title": "Title", "details": "Script text..." }
+        ],
+        "outro": "Closing statement"
+    }
+    `, topic, videoType, lengthInstruction, itemsContext)
 
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
@@ -296,49 +317,107 @@ func stitchVideos(files []string, outputFile string) error {
 }
 
 // --- 4. HELPERS (SMART CHUNKED TTS) ---
-func downloadGoogleTTS_Smart(text, outFile string) error {
-	// 1. Create the final file
-	finalFile, err := os.Create(outFile)
-	if err != nil { return err }
-	defer finalFile.Close()
+// func downloadGoogleTTS_Smart(text, outFile string) error {
+// 	// 1. Create the final file
+// 	finalFile, err := os.Create(outFile)
+// 	if err != nil { return err }
+// 	defer finalFile.Close()
 
-	// 2. Split text into sentences to avoid "400 Bad Request"
-	// We split by "." and "!" and "?"
-	// Simple approach: Replace ! and ? with . then split by .
-	cleanText := strings.ReplaceAll(text, "!", ".")
-	cleanText = strings.ReplaceAll(cleanText, "?", ".")
-	sentences := strings.Split(cleanText, ".")
+// 	// 2. Split text into sentences to avoid "400 Bad Request"
+// 	// We split by "." and "!" and "?"
+// 	// Simple approach: Replace ! and ? with . then split by .
+// 	cleanText := strings.ReplaceAll(text, "!", ".")
+// 	cleanText = strings.ReplaceAll(cleanText, "?", ".")
+// 	sentences := strings.Split(cleanText, ".")
 
-	for _, sentence := range sentences {
-		sentence = strings.TrimSpace(sentence)
-		if len(sentence) < 2 { continue } // Skip empty junk
+// 	for _, sentence := range sentences {
+// 		sentence = strings.TrimSpace(sentence)
+// 		if len(sentence) < 2 { continue } // Skip empty junk
 
-		// 3. Download this sentence
-		safeText := url.QueryEscape(sentence)
-		ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
+// 		// 3. Download this sentence
+// 		safeText := url.QueryEscape(sentence)
+// 		ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
 
-		req, _ := http.NewRequest("GET", ttsUrl, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
+// 		req, _ := http.NewRequest("GET", ttsUrl, nil)
+// 		req.Header.Set("User-Agent", "Mozilla/5.0")
 		
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil { 
-			fmt.Println("TTS Network Error:", err)
-			continue 
-		}
+// 		resp, err := http.DefaultClient.Do(req)
+// 		if err != nil { 
+// 			fmt.Println("TTS Network Error:", err)
+// 			continue 
+// 		}
 		
-		if resp.StatusCode != 200 {
-			fmt.Printf("TTS Error: %d for '%s'\n", resp.StatusCode, sentence)
-			resp.Body.Close()
-			continue
-		}
+// 		if resp.StatusCode != 200 {
+// 			fmt.Printf("TTS Error: %d for '%s'\n", resp.StatusCode, sentence)
+// 			resp.Body.Close()
+// 			continue
+// 		}
 
-		// 4. Append MP3 bytes to the final file
-		// (MP3s can be concatenated just by appending bytes!)
-		io.Copy(finalFile, resp.Body)
-		resp.Body.Close()
-	}
+// 		// 4. Append MP3 bytes to the final file
+// 		// (MP3s can be concatenated just by appending bytes!)
+// 		io.Copy(finalFile, resp.Body)
+// 		resp.Body.Close()
+// 	}
 	
-	return nil
+// 	return nil
+// }
+func downloadGoogleTTS_Smart(text, outFile string) error {
+    finalFile, err := os.Create(outFile)
+    if err != nil { return err }
+    defer finalFile.Close()
+
+    // Split text into chunks of max 180 characters to stay safe with Google TTS
+    chunks := splitText(text, 180)
+
+    for _, chunk := range chunks {
+        chunk = strings.TrimSpace(chunk)
+        if len(chunk) < 2 { continue }
+
+        safeText := url.QueryEscape(chunk)
+        ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
+
+        req, _ := http.NewRequest("GET", ttsUrl, nil)
+        req.Header.Set("User-Agent", "Mozilla/5.0")
+        
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil { continue }
+        
+        if resp.StatusCode == 200 {
+            io.Copy(finalFile, resp.Body)
+        }
+        resp.Body.Close()
+    }
+    return nil
+}
+
+// Helper to ensure text segments don't break the API
+func splitText(text string, limit int) []string {
+    var chunks []string
+    // Split by common sentence endings first
+    sentences := strings.FieldsFunc(text, func(r rune) bool {
+        return r == '.' || r == '!' || r == '?'
+    })
+
+    for _, s := range sentences {
+        s = strings.TrimSpace(s)
+        if len(s) <= limit {
+            chunks = append(chunks, s)
+        } else {
+            // If a single sentence is still too long, break it by spaces
+            words := strings.Split(s, " ")
+            currentChunk := ""
+            for _, word := range words {
+                if len(currentChunk)+len(word) < limit {
+                    currentChunk += " " + word
+                } else {
+                    chunks = append(chunks, strings.TrimSpace(currentChunk))
+                    currentChunk = word
+                }
+            }
+            chunks = append(chunks, strings.TrimSpace(currentChunk))
+        }
+    }
+    return chunks
 }
 
 func downloadTMDBPoster(query string, dest string) error {
