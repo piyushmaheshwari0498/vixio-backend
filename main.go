@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time" // Added for Sleep
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -237,10 +238,19 @@ func generateSegmentedScript(topic, category, videoType string, scenes []SceneDa
 func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	audioPath := strings.Replace(outputPath, ".mp4", ".mp3", 1)
 
+	// FIX: Throttled Downloader
 	if err := downloadGoogleTTS_Smart(text, audioPath); err != nil {
 		return fmt.Errorf("Google TTS failed: %v", err)
 	}
-	os.Remove(outputPath)
+	
+	// FIX: Validate Audio File Size
+	info, err := os.Stat(audioPath)
+	if err != nil || info.Size() == 0 {
+		return fmt.Errorf("audio file is empty (TTS blocked?)")
+	}
+
+	// Clean up if render fails
+	defer os.Remove(audioPath)
 
 	scale := "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
 	if videoType == "long" {
@@ -269,7 +279,6 @@ func renderSegment(text, mediaPath, outputPath, videoType string) error {
 	}
 
 	output, err := cmd.CombinedOutput()
-	os.Remove(audioPath)
 	if err != nil {
 		fmt.Printf("❌ FFmpeg Error: %s\n", string(output))
 		return err
@@ -307,11 +316,14 @@ func downloadGoogleTTS_Smart(text, outFile string) error {
 
 	chunks := splitText(text, 180)
 
-	for _, chunk := range chunks {
+	for i, chunk := range chunks {
 		chunk = strings.TrimSpace(chunk)
 		if len(chunk) < 2 {
 			continue
 		}
+
+		// FIX: Add Delay to prevent Google 429/403 Errors
+		if i > 0 { time.Sleep(250 * time.Millisecond) }
 
 		safeText := url.QueryEscape(chunk)
 		ttsUrl := fmt.Sprintf("https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en&dt=t&q=%s", safeText)
@@ -393,7 +405,8 @@ func downloadTMDBPoster(query string, dest string) error {
 	if len(res.Results) == 0 {
 		return fmt.Errorf("not found")
 	}
-	return downloadFile("https://image.tmdb.org/t/p/original"+res.Results[0].PosterPath, dest)
+	// FIX: Use w780 instead of 'original' to save RAM on Render
+	return downloadFile("https://image.tmdb.org/t/p/w780"+res.Results[0].PosterPath, dest)
 }
 
 func downloadPlaceholder(text, dest, vType string) {
